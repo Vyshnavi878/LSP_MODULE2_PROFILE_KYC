@@ -19,3 +19,4 @@ __pycache__/
 
 # OS files
 .DS_Store
+KYC_VERIFICATION/models/module1_user.py
