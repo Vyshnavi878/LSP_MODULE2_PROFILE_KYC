@@ -10,30 +10,31 @@ from models.dummy_bank_account import DummyBankAccount
 
 Base.metadata.create_all(bind=engine, checkfirst=True)
 
-MIN_AGE     = 18
-MAX_AGE     = 60
-MIN_PINCODE = 500000
-MAX_PINCODE = 534999
+MIN_AGE = 18
+MAX_AGE = 60
 
 fake = Faker("en_IN")
-db   = SessionLocal()
+db = SessionLocal()
+
 BANKS = [
     ("State Bank of India", "SBIN"),
-    ("HDFC Bank",           "HDFC"),
-    ("ICICI Bank",          "ICIC"),
-    ("Axis Bank",           "UTIB"),
-    ("Punjab National Bank","PUNB"),
-    ("Canara Bank",         "CNRB"),
+    ("HDFC Bank", "HDFC"),
+    ("ICICI Bank", "ICIC"),
+    ("Axis Bank", "UTIB"),
+    ("Punjab National Bank", "PUNB"),
+    ("Canara Bank", "CNRB"),
 ]
 
 AP_DISTRICTS = [
     "Kurnool", "Anantapur", "Kadapa", "Chittoor", "Visakhapatnam",
     "Vizianagaram", "Srikakulam", "East Godavari", "West Godavari", "Krishna",
 ]
+
 TG_DISTRICTS = [
     "Hyderabad", "Warangal", "Nizamabad", "Khammam", "Karimnagar",
     "Adilabad", "Mahabubnagar", "Ranga Reddy", "Medak", "Nalgonda",
 ]
+
 DISTRICTS = AP_DISTRICTS + TG_DISTRICTS
 
 MALE_NAMES = [
@@ -45,7 +46,7 @@ MALE_NAMES = [
     "Prasanth Palli", "Bhargav Kamma", "Sravan Dora", "Chaitanya Reddy", "Aditya Naidu",
     "Vivek Rao", "Guna Goud", "Anirudh Yadav", "Sathwik Kumar", "Hitesh Babu",
     "Akhil Murthy", "Ramachandra Chowdary", "Karthikeya Shaik", "Balakrishna Shetty",
-    "Giridhar Palli", "Govind Kamma", "Narayana Dora", "Raghunath Reddy", "Rajendra Naidu",
+    "Giridhar Palli", "Govind Kamma", "Narayana Dora", "Raghunath Reddy", "Rajendra Naidu"
 ]
 
 FEMALE_NAMES = [
@@ -56,12 +57,13 @@ FEMALE_NAMES = [
     "Deepa Babu", "Anusha Murthy", "Meena Chowdary", "Suma Shaik", "Neha Shetty",
     "Pooja Palli", "Rani Kamma", "Latha Dora", "Shobha Reddy", "Vani Naidu",
     "Sailaja Rao", "Madhuri Goud", "Bindu Yadav", "Harika Kumar", "Sruthi Babu",
-    "Nithya Murthy", "Varsha Chowdary", "Supriya Shaik", "Bhargavi Shetty",
+    "Nithya Murthy", "Varsha Chowdary", "Supriya Shaik", "Bhargavi Shetty"
 ]
 
 random.seed(42)
 ALL_NAMES = MALE_NAMES + FEMALE_NAMES
 random.shuffle(ALL_NAMES)
+
 def generate_pan(name: str) -> str:
     letters = string.ascii_uppercase
     first_three = "".join(random.choices(letters, k=3))
@@ -123,8 +125,16 @@ existing_accounts = set()
 
 try:
     for i, name in enumerate(ALL_NAMES, start=1):
+
         username = make_username(name, i)
         gender = "Female" if name in FEMALE_NAMES else "Male"
+        district = random.choice(DISTRICTS)
+        if district in AP_DISTRICTS:
+            state = "Andhra Pradesh"
+        else:
+            state = "Telangana"
+
+        address = f"{district}, {state}"
 
         user = User(
             username=username,
@@ -141,7 +151,7 @@ try:
             aadhaar_number=generate_unique_aadhaar(existing_aadhaars),
             full_name=name,
             dob=fake.date_of_birth(minimum_age=MIN_AGE, maximum_age=MAX_AGE),
-            address="Hyderabad, India",
+            address=address,
             gender=gender,
         )
         db.add(pan)
@@ -152,13 +162,11 @@ try:
             ifsc=generate_ifsc(prefix),
             bank_name=bank_name,
             account_holder_name=name,
-            is_active=True,
+            is_active=random.choice([True, True, True, False])
         )
         db.add(bank)
 
     db.commit()
-    print(f"\nSUCCESS: {len(ALL_NAMES)} users inserted!")
-    print("Password for all users: Test@1234")
 
 except Exception as e:
     db.rollback()

@@ -3,6 +3,7 @@ import secrets
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
+
 from models.attempt_tracker import VerificationType
 from repositories.user_repository import UserRepository
 from repositories.attempt_tracker_repository import AttemptTrackerRepository
@@ -12,17 +13,29 @@ from core.config import AADHAAR_MAX_ATTEMPTS, AADHAAR_COOLDOWN_HOURS, VERIFICATI
 
 logger = logging.getLogger(__name__)
 
-AADHAAR_TOKEN_EXPIRY_MINUTES = 10 
+AADHAAR_TOKEN_EXPIRY_MINUTES = 10   # each token valid 10 mins
+
 
 def _clear_aadhaar_session(user):
-    user.aadhaar_initiate_token = None
-    user.aadhaar_token_created_at = None
+    user.aadhaar_initiate_token      = None
+    user.aadhaar_token_created_at    = None
     user.aadhaar_token_attempt_count = 0
+
 
 class AadhaarVerificationService:
 
     @staticmethod
     def initiate_aadhaar(user_id: int, db: Session) -> dict:
+        """
+        Every call generates a FRESH token.
+        Each initiate counts as 1 attempt (max 3 total).
+        After 3 initiates with failures → 24hr block.
+
+        Flow:
+            Initiate → Token-1 → wrong → attempt=1
+            Initiate → Token-2 → wrong → attempt=2
+            Initiate → Token-3 → wrong → attempt=3 → BLOCKED 24hrs
+        """
         user = UserRepository.get_by_user_id(db, user_id)
         if not user:
             raise HTTPException(404, "User not found")
@@ -32,6 +45,8 @@ class AadhaarVerificationService:
 
         if user.aadhaar_status == "VERIFIED":
             raise HTTPException(400, "Aadhaar is already verified")
+
+        # ── Check global cooldown (24hr block active?) ────────────────────────
         now     = datetime.now(timezone.utc)
         tracker = AttemptTrackerRepository.get_or_create(db, user.email, VerificationType.AADHAAR)
 
@@ -46,10 +61,14 @@ class AadhaarVerificationService:
                     f"Aadhaar verification is blocked for {remaining_hrs} more hour(s) "
                     f"due to too many failed attempts."
                 )
+            # Block expired — reset
             AttemptTrackerRepository.reset_attempts(db, tracker)
+
+        # ── Check how many initiates already done ─────────────────────────────
         current_initiates = AttemptTrackerRepository.increment_attempt(db, tracker)
 
         if current_initiates > AADHAAR_MAX_ATTEMPTS:
+            # Should not reach here normally (blocked above), but safety net
             AttemptTrackerRepository.lock_tracker(
                 db, tracker, now + timedelta(hours=AADHAAR_COOLDOWN_HOURS)
             )
@@ -60,6 +79,8 @@ class AadhaarVerificationService:
                 f"Maximum attempts ({AADHAAR_MAX_ATTEMPTS}) exceeded. "
                 f"Aadhaar verification blocked for {AADHAAR_COOLDOWN_HOURS} hours."
             )
+
+        # ── Generate fresh token (invalidates any previous token) ─────────────
         token = secrets.token_hex(32)
         user.aadhaar_initiate_token      = token
         user.aadhaar_token_created_at    = now
@@ -103,8 +124,18 @@ class AadhaarVerificationService:
                 "mode":             "dummy",
             }
 
+    # ──────────────────────────────────────────────────────────────────────────
+
     @staticmethod
-    def verify_aadhaar(db: Session, user_id: int, initiate_token: str,):
+    def verify_aadhaar(db: Session, user_id: int, initiate_token: str,
+                       auth_code: str = None) -> dict:
+        """
+        Verify using the token from current initiate session.
+        Token valid 10 minutes only.
+        Wrong DOB/Aadhaar → failure logged, must re-initiate for next try.
+        3rd failure → 24hr block.
+        """
+        # ── 1. Load user ──────────────────────────────────────────────────────
         user = UserRepository.get_by_user_id(db, user_id)
         if not user:
             raise HTTPException(404, "User not found")
@@ -122,6 +153,8 @@ class AadhaarVerificationService:
 
         if user.aadhaar_locked:
             raise HTTPException(403, "Aadhaar is locked")
+
+        # ── 2. Check global cooldown ──────────────────────────────────────────
         now     = datetime.now(timezone.utc)
         tracker = AttemptTrackerRepository.get_or_create(db, user.email, VerificationType.AADHAAR)
 
@@ -135,6 +168,8 @@ class AadhaarVerificationService:
                     423,
                     f"Aadhaar verification is blocked for {remaining_hrs} more hour(s)."
                 )
+
+        # ── 3. Check token exists ─────────────────────────────────────────────
         if not user.aadhaar_initiate_token:
             raise HTTPException(
                 400,
@@ -142,6 +177,7 @@ class AadhaarVerificationService:
                 "Please call POST /api/v1/kyc/aadhaar-initiate first."
             )
 
+        # ── 4. Check token expiry ─────────────────────────────────────────────
         if user.aadhaar_token_created_at:
             created_at = user.aadhaar_token_created_at
             if created_at.tzinfo is None:
@@ -156,20 +192,29 @@ class AadhaarVerificationService:
                     f"Session token expired (valid {AADHAAR_TOKEN_EXPIRY_MINUTES} minutes). "
                     "Please call POST /api/v1/kyc/aadhaar-initiate to get a new token."
                 )
+
+        # ── 5. Validate token matches ─────────────────────────────────────────
         if user.aadhaar_initiate_token != initiate_token:
             raise HTTPException(
                 400,
                 "Invalid or expired token. "
                 "Please call POST /api/v1/kyc/aadhaar-initiate to get a fresh token."
             )
+
+        # ── 6. Validate Aadhaar number ────────────────────────────────────────
         aadhaar_number = user.aadhaar_number
         if not aadhaar_number or len(aadhaar_number) != 12:
             raise HTTPException(400, "Invalid Aadhaar number in profile")
 
+        # ── 7. Uniqueness check ───────────────────────────────────────────────
         existing = KYCAadhaarVerificationRepository.get_verified_by_aadhaar(db, aadhaar_number)
         if existing and existing.user_id != user.user_id:
             raise HTTPException(409, "This Aadhaar number is already linked to another account")
-        current_attempt = tracker.attempts_count 
+
+        # ── 8. Get current attempt count from tracker ─────────────────────────
+        current_attempt = tracker.attempts_count  # already incremented during initiate
+
+        # ── 9. Call provider ──────────────────────────────────────────────────
         provider = get_aadhaar_provider()
         try:
             result = provider.verify(
@@ -182,10 +227,15 @@ class AadhaarVerificationService:
             raise HTTPException(503, str(e))
 
         verified_dob = result.get("verified_dob") or ""
+
+        # ── 10. FAILURE ───────────────────────────────────────────────────────
         if not result["success"]:
+
+            # Clear this session token — must re-initiate for next attempt
             _clear_aadhaar_session(user)
 
             if current_attempt >= AADHAAR_MAX_ATTEMPTS:
+                # 3rd failure → BLOCK 24hrs
                 status = "BLOCKED"
                 user.aadhaar_status = "BLOCKED"
                 AttemptTrackerRepository.lock_tracker(
@@ -207,6 +257,7 @@ class AadhaarVerificationService:
                     f"Aadhaar verification blocked for {AADHAAR_COOLDOWN_HOURS} hours."
                 )
             else:
+                # 1st or 2nd failure → allow re-initiate
                 status = "FAILED"
                 user.aadhaar_status = "FAILED"
                 remaining = AADHAAR_MAX_ATTEMPTS - current_attempt
@@ -226,6 +277,8 @@ class AadhaarVerificationService:
                     f"{remaining} attempt(s) remaining. "
                     "Please fix your details and call /aadhaar-initiate again for a new token."
                 )
+
+        # ── 11. SUCCESS ───────────────────────────────────────────────────────
         user.aadhaar_status      = "VERIFIED"
         user.aadhaar_locked      = True
         user.dob_locked          = True
