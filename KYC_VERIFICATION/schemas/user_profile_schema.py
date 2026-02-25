@@ -41,6 +41,20 @@ class UserRegistrationRequest(BaseModel):
         if age < 18:
             raise ValueError("User must be at least 18 years old")
         return v
+    
+    @field_validator("employment_type")
+    @classmethod
+    def validate_employment_type(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Employment type is required")
+        return v
+
+    @field_validator("monthly_income")
+    @classmethod
+    def validate_monthly_income(cls, v: Decimal) -> Decimal:
+        if v <= 1:
+            raise ValueError("Enter monthly income")
+        return v
 
     @field_validator("pan_number")
     @classmethod
